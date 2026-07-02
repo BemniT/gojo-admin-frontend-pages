@@ -3,16 +3,21 @@ import axios from "axios";
 import { FaSearch, FaUserShield, FaComments, FaChalkboardTeacher, FaUsers, FaExclamationTriangle, FaPlus } from "react-icons/fa";
 import { FIREBASE_DATABASE_URL } from "../config.js";
 import {
+  buildChatSummaryPath,
+  buildChatSummaryUpdate,
   fetchJson,
-  formatLastMessagePreview,
   mapInBatches,
   parseChatParticipantIds,
 } from "../utils/chatRtdb";
+import { fetchCachedJson } from "../utils/rtdbCache";
+
+const ROLE_SET_CACHE_TTL_MS = 15 * 60 * 1000;
 
 const RTDB_BASE = FIREBASE_DATABASE_URL;
 const DEFAULT_ALERT_KEYWORDS = ["abuse", "insult", "harass", "threat", "meeting outside", "money transfer"];
 const ALERT_KEYWORDS_STORAGE_KEY = "message_control_alert_keywords";
-const REFRESH_INTERVAL_MS = 60000;
+const REFRESH_INTERVAL_MS = 3 * 60 * 1000;
+const REFRESH_IDLE_GRACE_MS = 5 * 60 * 1000;
 
 const readStoredAdmin = () => {
   try {
@@ -123,6 +128,9 @@ export default function MessageControl() {
   const [draftKeywordsInput, setDraftKeywordsInput] = useState("");
   const [showKeywordModal, setShowKeywordModal] = useState(false);
   const hasLoadedRef = useRef(false);
+  const refreshPromiseRef = useRef(null);
+  const lastMonitorInteractionAtRef = useRef(Date.now());
+  const userRecordCacheRef = useRef(new Map());
   const [selectedConversationMessages, setSelectedConversationMessages] = useState([]);
   const [selectedConversationMessagesLoading, setSelectedConversationMessagesLoading] = useState(false);
   const [isCompactLayout, setIsCompactLayout] = useState(() => {
@@ -158,71 +166,187 @@ export default function MessageControl() {
   }, []);
 
   useEffect(() => {
+    const markInteraction = () => {
+      lastMonitorInteractionAtRef.current = Date.now();
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document === "undefined" || document.visibilityState !== "visible") {
+        return;
+      }
+      markInteraction();
+    };
+
+    window.addEventListener("focus", markInteraction);
+    window.addEventListener("online", markInteraction);
+    window.addEventListener("pointerdown", markInteraction, { passive: true });
+    window.addEventListener("touchstart", markInteraction, { passive: true });
+    window.addEventListener("keydown", markInteraction);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", markInteraction);
+      window.removeEventListener("online", markInteraction);
+      window.removeEventListener("pointerdown", markInteraction);
+      window.removeEventListener("touchstart", markInteraction);
+      window.removeEventListener("keydown", markInteraction);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
     if (!schoolCode) {
       setConversations([]);
       setSelectedChatId("");
       setSelectedConversationMessages([]);
       hasLoadedRef.current = false;
+      refreshPromiseRef.current = null;
       return;
     }
 
-    const loadMonitorData = async () => {
-      setLoading(!hasLoadedRef.current);
-      setError("");
-      try {
-        const [
-          usersRes,
-          teachersRes,
-          studentsRes,
-          parentsRes,
-          managementRes,
-          hrRes,
-          registerersRes,
-          schoolAdminsRes,
-          chatIndex,
-        ] = await Promise.all([
-          fetchJson(`${SCHOOL_DB_ROOT}/Users.json`, {}),
-          fetchJson(`${SCHOOL_DB_ROOT}/Teachers.json`, {}),
-          fetchJson(`${SCHOOL_DB_ROOT}/Students.json`, {}),
-          fetchJson(`${SCHOOL_DB_ROOT}/Parents.json`, {}),
-          fetchJson(`${SCHOOL_DB_ROOT}/Management.json`, {}),
-          fetchJson(`${SCHOOL_DB_ROOT}/HR.json`, {}),
-          fetchJson(`${SCHOOL_DB_ROOT}/Registerers.json`, {}),
-          fetchJson(`${SCHOOL_DB_ROOT}/School_Admins.json`, {}),
-          fetchJson(`${SCHOOL_DB_ROOT}/Chats.json?shallow=true`, {}),
-        ]);
+    const loadMonitorData = async ({ reason = "active" } = {}) => {
+      const isVisible = typeof document === "undefined" || document.visibilityState === "visible";
+      const isOnline = typeof navigator === "undefined" || navigator.onLine !== false;
+      const recentInteraction = Date.now() - lastMonitorInteractionAtRef.current < REFRESH_IDLE_GRACE_MS;
+      const isUserDriven = reason !== "passive";
 
-        const users = usersRes || {};
-        const chatIds = Object.keys(chatIndex || {});
+      if (!isUserDriven && (!isVisible || !isOnline || !recentInteraction)) {
+        return;
+      }
 
-        const toUserSet = (source) =>
-          new Set(
-            Object.values(source || {})
-              .map((item) => String(item?.userId || "").trim())
-              .filter(Boolean)
-          );
+      if (refreshPromiseRef.current) {
+        return refreshPromiseRef.current;
+      }
 
-        const roleSets = {
-          teachers: toUserSet(teachersRes),
-          students: toUserSet(studentsRes),
-          parents: toUserSet(parentsRes),
-          registerers: toUserSet(registerersRes),
-          finance: toUserSet(hrRes),
-          academic: new Set([...toUserSet(managementRes), ...toUserSet(schoolAdminsRes)]),
-        };
+      const requestPromise = (async () => {
+        setLoading(!hasLoadedRef.current);
+        setError("");
+        try {
+          const readUserRecord = async (userId) => {
+            const normalizedUserId = String(userId || "").trim();
+            if (!normalizedUserId) {
+              return {};
+            }
 
-        const parsedChats = (await mapInBatches(chatIds, 20, async (chatId) => {
-          const encodedChatId = encodeURIComponent(chatId);
-          const [participantsNode, lastMessage, unreadNode, messageKeys] = await Promise.all([
-            fetchJson(`${SCHOOL_DB_ROOT}/Chats/${encodedChatId}/participants.json`, {}),
-            fetchJson(`${SCHOOL_DB_ROOT}/Chats/${encodedChatId}/lastMessage.json`, null),
-            fetchJson(`${SCHOOL_DB_ROOT}/Chats/${encodedChatId}/unread.json`, {}),
-            fetchJson(`${SCHOOL_DB_ROOT}/Chats/${encodedChatId}/messages.json?shallow=true`, {}),
+            const cacheKey = `${schoolCode}:${normalizedUserId}`;
+            if (userRecordCacheRef.current.has(cacheKey)) {
+              return userRecordCacheRef.current.get(cacheKey) || {};
+            }
+
+            let record = {};
+            try {
+              record = await fetchJson(
+                `${SCHOOL_DB_ROOT}/Users/${encodeURIComponent(normalizedUserId)}.json`,
+                {}
+              );
+            } catch {
+              record = {};
+            }
+
+            if (!record || typeof record !== "object" || Array.isArray(record)) {
+              record = {};
+            }
+
+            if (!Object.keys(record).length) {
+              const orderByUserId = encodeURIComponent('"userId"');
+              const equalToUserId = encodeURIComponent(`"${normalizedUserId}"`);
+              const queriedUsers = await fetchJson(
+                `${SCHOOL_DB_ROOT}/Users.json?orderBy=${orderByUserId}&equalTo=${equalToUserId}&limitToFirst=1`,
+                {}
+              );
+              const firstMatch = Object.values(queriedUsers || {}).find(
+                (candidate) => candidate && typeof candidate === "object" && !Array.isArray(candidate)
+              );
+              record = firstMatch || {};
+            }
+
+            userRecordCacheRef.current.set(cacheKey, record);
+            return record;
+          };
+
+          const [
+            teachersRes,
+            studentsRes,
+            parentsRes,
+            managementRes,
+            hrRes,
+            registerersRes,
+            schoolAdminsRes,
+            chatIndex,
+          ] = await Promise.all([
+            fetchCachedJson(`${SCHOOL_DB_ROOT}/TeacherDirectory.json`, { ttlMs: ROLE_SET_CACHE_TTL_MS, fallbackValue: {} }),
+            fetchCachedJson(`${SCHOOL_DB_ROOT}/StudentDirectory.json`, { ttlMs: ROLE_SET_CACHE_TTL_MS, fallbackValue: {} }),
+            fetchCachedJson(`${SCHOOL_DB_ROOT}/ParentDirectory.json`, { ttlMs: ROLE_SET_CACHE_TTL_MS, fallbackValue: {} }),
+            fetchJson(`${SCHOOL_DB_ROOT}/Management.json`, {}),
+            fetchJson(`${SCHOOL_DB_ROOT}/HR.json`, {}),
+            fetchJson(`${SCHOOL_DB_ROOT}/Registerers.json`, {}),
+            fetchJson(`${SCHOOL_DB_ROOT}/School_Admins.json`, {}),
+            fetchJson(`${SCHOOL_DB_ROOT}/Chats.json?shallow=true`, {}),
           ]);
 
-          const participantIds = parseChatParticipantIds(chatId, participantsNode);
-          const participants = participantIds.slice(0, 2).map((id) => {
-              const userNode = users[id] || {};
+          const chatIds = Object.keys(chatIndex || {});
+
+          const toUserSet = (source) =>
+            new Set(
+              Object.values(source || {})
+                .map((item) => String(item?.userId || "").trim())
+                .filter(Boolean)
+            );
+
+          const roleSets = {
+            teachers: toUserSet(teachersRes),
+            students: toUserSet(studentsRes),
+            parents: toUserSet(parentsRes),
+            registerers: toUserSet(registerersRes),
+            finance: toUserSet(hrRes),
+            academic: new Set([...toUserSet(managementRes), ...toUserSet(schoolAdminsRes)]),
+          };
+
+          const parsedChatMetadata = await mapInBatches(chatIds, 20, async (chatId) => {
+            const encodedChatId = encodeURIComponent(chatId);
+            const [participantsNode, messageKeys, lastMessageNode] = await Promise.all([
+              fetchJson(`${SCHOOL_DB_ROOT}/Chats/${encodedChatId}/participants.json`, {}),
+              fetchJson(`${SCHOOL_DB_ROOT}/Chats/${encodedChatId}/messages.json?shallow=true`, {}),
+              fetchJson(
+                `${SCHOOL_DB_ROOT}/Chats/${encodedChatId}/messages.json?orderBy=${encodeURIComponent('"$key"')}&limitToLast=1`,
+                {}
+              ),
+            ]);
+            const participantIds = parseChatParticipantIds(chatId, participantsNode);
+            const lastMessageValue = Object.values(lastMessageNode || {})[0] || {};
+
+            return {
+              chatId,
+              participantIds,
+              messageCount: Object.keys(messageKeys || {}).length,
+              lastMessageText: String(lastMessageValue?.text || lastMessageValue?.message || "").trim(),
+              lastMessageTime: Number(
+                lastMessageValue?.timeStamp || lastMessageValue?.timestamp || lastMessageValue?.sentAt || 0
+              ),
+            };
+          });
+
+          const uniqueParticipantIds = Array.from(
+            new Set(
+              parsedChatMetadata
+                .flatMap((chat) => chat?.participantIds || [])
+                .map((value) => String(value || "").trim())
+                .filter(Boolean)
+            )
+          );
+
+          const usersById = new Map();
+          await mapInBatches(uniqueParticipantIds, 24, async (participantUserId) => {
+            const userRecord = await readUserRecord(participantUserId);
+            usersById.set(participantUserId, userRecord || {});
+            return null;
+          });
+
+          const parsedChats = parsedChatMetadata.map((chatMetadata) => {
+            const participants = (chatMetadata.participantIds || []).slice(0, 2).map((id) => {
+              const userNode = usersById.get(id) || {};
               const role = resolveUserRole(id, userNode, roleSets);
 
               return {
@@ -236,58 +360,87 @@ export default function MessageControl() {
             const leftRole = participants[0]?.role || "user";
             const rightRole = participants[1]?.role || "user";
             const category = getPairCategory(leftRole, rightRole);
-            const unreadTotal = Object.values(unreadNode).reduce(
-              (sum, value) => sum + Number(value || 0),
-              0
-            );
 
             return {
-              chatId,
+              chatId: chatMetadata.chatId,
               participants,
               category,
               categoryLabel: pairCategoryLabel[category] || "Other",
-              messageCount: Object.keys(messageKeys || {}).length,
-              unreadTotal,
-              lastMessageText: formatLastMessagePreview(lastMessage),
-              lastMessageTime: Number(lastMessage?.timeStamp || 0),
+              messageCount: Number(chatMetadata.messageCount || 0),
+              unreadTotal: 0,
+              lastMessageText: String(chatMetadata.lastMessageText || "").trim(),
+              lastMessageTime: Number(chatMetadata.lastMessageTime || 0),
               messages: [],
             };
-          }))
-          .filter(Boolean)
-          .sort((left, right) => Number(right.lastMessageTime || 0) - Number(left.lastMessageTime || 0));
+          })
+            .filter(Boolean)
+            .sort((left, right) => Number(right.lastMessageTime || 0) - Number(left.lastMessageTime || 0));
 
-        setConversations(parsedChats);
-        setSelectedChatId((previousChatId) => {
-          if (previousChatId && parsedChats.some((chat) => chat.chatId === previousChatId)) {
-            return previousChatId;
+          if (cancelled) {
+            return;
           }
-          return "";
-        });
-      } catch (requestError) {
-        setError("Failed to load chat monitor data.");
-      } finally {
-        hasLoadedRef.current = true;
-        setLoading(false);
-      }
+
+          setConversations(parsedChats);
+          setSelectedChatId((previousChatId) => {
+            if (previousChatId && parsedChats.some((chat) => chat.chatId === previousChatId)) {
+              return previousChatId;
+            }
+            return "";
+          });
+        } catch (requestError) {
+          if (!cancelled) {
+            setError("Failed to load chat monitor data.");
+          }
+        } finally {
+          if (!cancelled) {
+            hasLoadedRef.current = true;
+            setLoading(false);
+          }
+        }
+      })();
+
+      refreshPromiseRef.current = requestPromise;
+      requestPromise.finally(() => {
+        if (refreshPromiseRef.current === requestPromise) {
+          refreshPromiseRef.current = null;
+        }
+      });
+
+      return requestPromise;
     };
 
-    const runRefresh = () => {
+    const runFocusedRefresh = () => {
+      lastMonitorInteractionAtRef.current = Date.now();
+      void loadMonitorData({ reason: "active" });
+    };
+
+    const runPassiveRefresh = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") {
         return;
       }
-      loadMonitorData();
+      void loadMonitorData({ reason: "passive" });
     };
 
-    runRefresh();
+    const handleVisibilityChange = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        return;
+      }
+      runFocusedRefresh();
+    };
 
-    const intervalId = window.setInterval(runRefresh, REFRESH_INTERVAL_MS);
-    window.addEventListener("focus", runRefresh);
-    document.addEventListener("visibilitychange", runRefresh);
+    runFocusedRefresh();
+
+    const intervalId = window.setInterval(runPassiveRefresh, REFRESH_INTERVAL_MS);
+    window.addEventListener("focus", runFocusedRefresh);
+    window.addEventListener("online", runFocusedRefresh);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
+      cancelled = true;
       window.clearInterval(intervalId);
-      window.removeEventListener("focus", runRefresh);
-      document.removeEventListener("visibilitychange", runRefresh);
+      window.removeEventListener("focus", runFocusedRefresh);
+      window.removeEventListener("online", runFocusedRefresh);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [SCHOOL_DB_ROOT, schoolCode]);
 
@@ -352,6 +505,7 @@ export default function MessageControl() {
   }, [enrichedConversations]);
 
   const handleSelectConversation = async (chatId) => {
+    const selectedConversation = conversations.find((conversation) => conversation.chatId === chatId) || null;
     setSelectedChatId(chatId);
     setSelectedConversationMessages([]);
     setConversations((previousConversations) =>
@@ -363,18 +517,24 @@ export default function MessageControl() {
     );
 
     try {
-      const unreadSnapshot = await axios
-        .get(`${SCHOOL_DB_ROOT}/Chats/${chatId}/unread.json`)
-        .catch(() => ({ data: {} }));
-      const unreadNode = unreadSnapshot.data || {};
-      const resetPayload = Object.keys(unreadNode).reduce((payload, key) => {
-        payload[key] = 0;
-        return payload;
-      }, {});
-
-      if (Object.keys(resetPayload).length > 0) {
-        await axios.patch(`${SCHOOL_DB_ROOT}/Chats/${chatId}/unread.json`, resetPayload);
-      }
+      const participants = Array.isArray(selectedConversation?.participants) ? selectedConversation.participants : [];
+      await Promise.all(
+        participants
+          .filter((participant) => String(participant?.userId || "").trim())
+          .map((participant) => {
+            const otherParticipant = participants.find(
+              (candidate) => String(candidate?.userId || "").trim() !== String(participant?.userId || "").trim()
+            );
+            return axios.patch(
+              `${SCHOOL_DB_ROOT}/${buildChatSummaryPath(participant.userId, chatId)}.json`,
+              buildChatSummaryUpdate({
+                chatId,
+                otherUserId: otherParticipant?.userId || "",
+                unreadCount: 0,
+              })
+            );
+          })
+      );
     } catch {
       // keep UI updated even if remote reset fails
     }

@@ -5,6 +5,7 @@ import Login from "../pages/Login";
 import AdminTopbarLayout from "../components/AdminTopbarLayout";
 
 import Dashboard from "../pages/Dashboard";
+import { ProtectedRoute } from "../components/ProtectedRoute";
 import MyPosts from "../pages/MyPosts";
 import OverviewPage from "../pages/Overview";
 import Teachers from "../pages/Teachers";
@@ -62,7 +63,7 @@ export default function AppRoutes() {
 
         {/* Admin Pages */}
         <Route element={<RequireAdmin><AdminTopbarLayout /></RequireAdmin>}>
-          <Route path="dashboard" element={<Dashboard />} />
+          <Route path="dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
           <Route path="my-posts" element={<MyPosts />} />
           <Route path="overview" element={<OverviewPage />} />
           <Route path="teachers" element={<Teachers />} />

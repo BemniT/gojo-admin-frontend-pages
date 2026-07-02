@@ -17,5 +17,5 @@ const rawFirebaseDatabaseUrl = (viteFirebaseDatabaseEnv || nodeFirebaseDatabaseE
 export const FIREBASE_DATABASE_URL = String(rawFirebaseDatabaseUrl).trim().replace(/\/$/, "");
 
 // Example override for local development (Vite): create .env with
-// VITE_BACKEND_BASE=https://gojo-unified-backend-165080444737.us-central1.run.app/api/admin
+// VITE_BACKEND_BASE=http://127.0.0.1:5001
 // VITE_FIREBASE_DATABASE_URL=https://gojo-education-default-rtdb.firebaseio.com

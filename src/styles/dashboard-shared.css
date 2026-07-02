@@ -1,0 +1,284 @@
+/* ============================================================
+   Shared dashboard styles — used by Dashboard, MyPosts, Overview
+   and every other page wrapped in <DashboardLayout>.
+
+   These live in a static CSS file (instead of a React <style> tag)
+   so they don't unmount/remount when routes change. That stops
+   the page from flickering on navigation.
+   ============================================================ */
+
+/* ---- Auto-hiding scrollbars (Stripe / Linear style) ---- */
+.dashboard-page,
+.dashboard-page * {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 250ms ease;
+}
+.dashboard-page:hover,
+.dashboard-page *:hover {
+  scrollbar-color: rgba(15, 23, 42, 0.18) transparent;
+}
+
+/* When the right widget column overflows internally, show a faint hint scrollbar */
+.dashboard-widgets:hover {
+  scrollbar-color: rgba(15, 23, 42, 0.24) transparent;
+}
+.dashboard-widgets::-webkit-scrollbar {
+  width: 6px;
+}
+.dashboard-widgets::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+  transition: background 220ms ease;
+}
+.dashboard-widgets:hover::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.22);
+}
+.dashboard-widgets::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.36);
+}
+
+/* Global body/html scrollbar treatment */
+html,
+body {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+html:hover,
+body:hover {
+  scrollbar-color: rgba(15, 23, 42, 0.18) transparent;
+}
+body::-webkit-scrollbar {
+  width: 8px;
+}
+body::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+  transition: background 250ms ease;
+}
+body:hover::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.18);
+}
+
+/* ---- Section header card ---- */
+.section-header-card {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-soft);
+}
+.section-header-card__title {
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.section-header-card__subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ---- Posts feed container ---- */
+.posts-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  margin-left: 0;
+}
+.post-box {
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* ---- Facebook-style post card ---- */
+.facebook-post-card {
+  width: 100%;
+  max-width: 680px;
+  margin: 0 auto;
+  position: relative;
+  isolation: isolate;
+}
+.facebook-post-card:hover {
+  transform: translateY(-2px);
+}
+.facebook-post-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.facebook-post-card__header-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.facebook-post-card__avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+  background: #fff;
+}
+.facebook-post-card__identity {
+  min-width: 0;
+  flex: 1;
+}
+.facebook-post-card__identity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.facebook-post-card__identity-row h4 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.facebook-post-card__page-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #e7f3ff;
+  color: #0866ff;
+  font-size: 10px;
+  font-weight: 800;
+}
+.facebook-post-card__meta {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  font-weight: 600;
+  color: #65676b;
+}
+.facebook-post-card__type-chip {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #f0f6ff 0%, #e7f3ff 100%);
+  border: 1px solid #bfdcff;
+  color: #0866ff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.facebook-post-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.facebook-post-card__message {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.45;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.facebook-post-card__read-more {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #0866ff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+}
+.facebook-post-card__media-shell {
+  background: #eff2f5;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.facebook-post-card__media {
+  width: 100%;
+  height: auto;
+  max-height: min(68vh, 540px);
+  object-fit: contain;
+  display: block;
+  background: #eff2f5;
+}
+.facebook-post-card__stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+.facebook-post-card__stats-left,
+.facebook-post-card__stats-right {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #65676b;
+}
+.facebook-post-card__stats-right {
+  justify-content: flex-end;
+  text-align: right;
+}
+.facebook-post-card__reaction-bubble {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: #0866ff;
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(8, 102, 255, 0.22);
+}
+.facebook-post-card__actions {
+  display: flex;
+}
+.facebook-post-card__action-button {
+  width: 100%;
+  min-height: 36px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #65676b;
+  font-size: 13px;
+  font-weight: 800;
+  transition: background 160ms ease, color 160ms ease;
+}
+.facebook-post-card__action-button:hover {
+  background: #f2f4f7;
+}
+.facebook-post-card__action-button.is-active {
+  background: #e7f3ff;
+  color: #0866ff;
+}
+
+/* ---- Responsive: hide right sidebar on narrow viewports ---- */
+@media (max-width: 1100px) {
+  .admin-sidebar-spacer,
+  .dashboard-widgets {
+    display: none !important;
+  }
+}

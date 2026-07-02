@@ -20,7 +20,10 @@ import { saveAs } from "file-saver";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { BACKEND_BASE } from "../config.js";
-import { fetchJson, getSafeProfileImage, mapInBatches, parseChatParticipantIds } from "../utils/chatRtdb";
+import {
+  getSafeProfileImage,
+} from "../utils/chatRtdb";
+import { schoolNodeBase } from "../utils/schoolDbRouting";
 
 /* ================= CONSTANTS ================= */
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
@@ -38,7 +41,8 @@ const PERIODS = [
 
 const FREE_ID = "__FREE__";
 const FREE_SUBJECT = "Free Period";
-const NOTIFICATION_REFRESH_MS = 60000;
+const NOTIFICATION_REFRESH_MS = 3 * 60 * 1000;
+const NOTIFICATION_IDLE_GRACE_MS = 5 * 60 * 1000;
 
 const sanitizeForFirebase = (value) => {
   if (value === undefined) return null;
@@ -56,12 +60,8 @@ export default function SchedulePage() {
   const admin = JSON.parse(localStorage.getItem("admin")) || {};
   const API_BASE = `${BACKEND_BASE}/api`;
   const [schoolCode, setSchoolCode] = useState(() => String(admin.schoolCode || "").trim());
-  const RTDB_BASE = "https://bale-house-rental-default-rtdb.firebaseio.com";
-  const SCHOOL_DB_ROOT = schoolCode
-    ? `${RTDB_BASE}/Platform1/Schools/${encodeURIComponent(schoolCode)}`
-    : RTDB_BASE;
+  const SCHOOL_DB_ROOT = schoolNodeBase(schoolCode);
 
-  const getSchoolNodeUrl = (nodeName) => `${SCHOOL_DB_ROOT}/${nodeName}.json`;
   const getSchoolNodePath = (nodeName) =>
     schoolCode ? `Platform1/Schools/${schoolCode}/${nodeName}` : nodeName;
 
@@ -72,53 +72,18 @@ export default function SchedulePage() {
     }
 
     try {
-      const schoolRes = await axios.get(getSchoolNodeUrl(nodeName));
-      return schoolRes.data ?? {};
+      const schoolRes = await axios.get(`${API_BASE}/school-node-read`, {
+        params: {
+          schoolCode,
+          path: nodeName,
+        },
+        timeout: 12000,
+      });
+      return schoolRes?.data?.data ?? {};
     } catch (err) {
       console.error(`Failed to read school node ${nodeName}:`, err);
       return {};
     }
-  };
-
-  const fetchChatMessages = async (chatKey) => {
-    const encodedChatKey = encodeURIComponent(chatKey);
-
-    if (schoolCode) {
-      try {
-        const schoolRes = await axios.get(
-          `${SCHOOL_DB_ROOT}/Chats/${encodedChatKey}/messages.json`
-        );
-        if (schoolRes.data !== null && schoolRes.data !== undefined) {
-          return schoolRes.data;
-        }
-      } catch (err) {
-        // fallback to root for legacy chat paths
-      }
-    }
-
-    try {
-      const rootRes = await axios.get(
-        `${RTDB_BASE}/Chats/${encodedChatKey}/messages.json`
-      );
-      return rootRes.data ?? {};
-    } catch (err) {
-      return {};
-    }
-  };
-
-  const patchScopedRoot = async (updates) => {
-    if (!updates || Object.keys(updates).length === 0) return;
-
-    if (schoolCode) {
-      try {
-        await axios.patch(`${SCHOOL_DB_ROOT}/.json`, updates);
-        return;
-      } catch (err) {
-        // fallback to root for legacy chat paths
-      }
-    }
-
-    await axios.patch(`${RTDB_BASE}/.json`, updates);
   };
 
   /* ================= STATE ================= */
@@ -156,11 +121,22 @@ const [teacherChatOpen, setTeacherChatOpen] = useState(false);
 const [postNotifications, setPostNotifications] = useState([]);
 const [showPostDropdown, setShowPostDropdown] = useState(false);
 const [dragHint, setDragHint] = useState(null);
+const lastNotificationInteractionAtRef = useRef(Date.now());
 
 
 const adminId = admin.userId;
 
 const adminUserId = admin.userId;
+
+const shouldRunPassiveNotificationRefresh = () => {
+  const isVisible = typeof document === "undefined" || document.visibilityState === "visible";
+  const isOnline = typeof navigator === "undefined" || navigator.onLine !== false;
+  const isRecentlyActive = Date.now() - lastNotificationInteractionAtRef.current < NOTIFICATION_IDLE_GRACE_MS;
+  return isVisible && isOnline && isRecentlyActive;
+};
+
+const isTimeoutError = (err) =>
+  err?.code === "ECONNABORTED" || /timeout/i.test(String(err?.message || ""));
 
 const MAX_TEACHER_PERIODS_PER_DAY = 4;
 
@@ -171,72 +147,107 @@ const fetchPostNotifications = async () => {
   }
 
   try {
-    const postsNode = await fetchJson(
-      `${SCHOOL_DB_ROOT}/Posts.json?orderBy=%22%24key%22&limitToLast=25`,
-      {}
-    );
-
-    const notifications = Object.entries(postsNode || {})
-      .map(([postId, postValue]) => ({ postId, ...postValue }))
-      .filter((postValue) => postValue && typeof postValue === "object")
-      .filter((postValue) => !postValue?.seenBy || !postValue.seenBy[admin.userId])
-      .sort(
-        (leftPost, rightPost) =>
-          new Date(rightPost.time || rightPost.createdAt || 0).getTime() -
-          new Date(leftPost.time || leftPost.createdAt || 0).getTime()
-      )
-      .slice(0, 25)
-      .map((postValue) => ({
-        ...postValue,
-        notificationId:
-          postValue?.notificationId ||
-          postValue?.id ||
-          `${postValue.postId}_${postValue.adminId || postValue.userId || "admin"}`,
-        adminName: postValue?.adminName || "Admin",
-        adminProfile: getSafeProfileImage(
-          postValue?.adminProfile || postValue?.adminProfileImage || postValue?.profileImage,
-          "/default-profile.png"
-        ),
-      }));
+    const response = await axios.get(`${API_BASE}/get_post_notifications/${encodeURIComponent(adminId)}`, {
+      params: { schoolCode, limit: 25 },
+      timeout: 20000,
+    });
+    const rawNotifications = Array.isArray(response?.data) ? response.data : [];
+    const notifications = rawNotifications.map((postValue) => ({
+      ...postValue,
+      notificationId:
+        postValue?.notificationId ||
+        postValue?.id ||
+        `${postValue?.postId || "post"}_${postValue?.adminId || postValue?.userId || "admin"}`,
+      adminName: postValue?.adminName || "Admin",
+      adminProfile: getSafeProfileImage(postValue?.adminProfile, "/default-profile.png"),
+    }));
 
     setPostNotifications(notifications);
   } catch (err) {
+    if (isTimeoutError(err)) {
+      console.warn("Post notification fetch timed out; keeping previous notifications.");
+      return;
+    }
     console.error("Post notification fetch failed", err);
-    setPostNotifications([]);
   }
 };
 
 
 useEffect(() => {
+  const markNotificationInteraction = () => {
+    lastNotificationInteractionAtRef.current = Date.now();
+  };
+
+  const handleVisibilityChange = () => {
+    if (typeof document === "undefined" || document.visibilityState !== "visible") {
+      return;
+    }
+    markNotificationInteraction();
+  };
+
+  window.addEventListener("focus", markNotificationInteraction);
+  window.addEventListener("online", markNotificationInteraction);
+  window.addEventListener("pointerdown", markNotificationInteraction, { passive: true });
+  window.addEventListener("touchstart", markNotificationInteraction, { passive: true });
+  window.addEventListener("keydown", markNotificationInteraction);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+
+  return () => {
+    window.removeEventListener("focus", markNotificationInteraction);
+    window.removeEventListener("online", markNotificationInteraction);
+    window.removeEventListener("pointerdown", markNotificationInteraction);
+    window.removeEventListener("touchstart", markNotificationInteraction);
+    window.removeEventListener("keydown", markNotificationInteraction);
+    document.removeEventListener("visibilitychange", handleVisibilityChange);
+  };
+}, []);
+
+
+useEffect(() => {
   if (!adminId || !schoolCode) return undefined;
 
-  const runRefresh = () => {
-    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+  const runFocusedRefresh = () => {
+    lastNotificationInteractionAtRef.current = Date.now();
+    fetchPostNotifications();
+  };
+
+  const runPassiveRefresh = () => {
+    if (!shouldRunPassiveNotificationRefresh()) {
       return;
     }
 
     fetchPostNotifications();
   };
 
-  runRefresh();
-  const interval = window.setInterval(runRefresh, NOTIFICATION_REFRESH_MS);
-  window.addEventListener("focus", runRefresh);
-  document.addEventListener("visibilitychange", runRefresh);
+  const handleVisibilityChange = () => {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+      return;
+    }
+    runFocusedRefresh();
+  };
+
+  runFocusedRefresh();
+  const interval = window.setInterval(runPassiveRefresh, NOTIFICATION_REFRESH_MS);
+  window.addEventListener("focus", runFocusedRefresh);
+  window.addEventListener("online", runFocusedRefresh);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 
   return () => {
     window.clearInterval(interval);
-    window.removeEventListener("focus", runRefresh);
-    document.removeEventListener("visibilitychange", runRefresh);
+    window.removeEventListener("focus", runFocusedRefresh);
+    window.removeEventListener("online", runFocusedRefresh);
+    document.removeEventListener("visibilitychange", handleVisibilityChange);
   };
 }, [adminId, schoolCode]);
 
 
 const handleNotificationClick = async (notification) => {
   try {
-    await axios.put(
-      `${SCHOOL_DB_ROOT}/Posts/${encodeURIComponent(notification.postId)}/seenBy/${encodeURIComponent(admin.userId)}.json`,
-      true
-    );
+    await axios.post(`${API_BASE}/mark_post_notification_read`, {
+      adminId: admin.userId,
+      postId: notification.postId,
+      schoolCode,
+    });
   } catch (err) {
     console.warn("Failed to mark post as seen:", err);
   }
@@ -600,30 +611,30 @@ useEffect(() => {
 
       setTeachers(teacherList);
 
-      // fetch unread messages
-      const unread = {};
-      const allMessages = [];
+      try {
+        // Fetch unread message counts via backend summary endpoint.
+        const unreadRes = await axios.get(`${API_BASE}/unread_messages/${encodeURIComponent(adminUserId)}`, {
+          params: { schoolCode },
+          timeout: 20000,
+        });
+        const unreadMessages = Array.isArray(unreadRes?.data?.messages) ? unreadRes.data.messages : [];
+        const teacherUserIds = new Set(teacherList.map((teacher) => String(teacher?.userId || "")).filter(Boolean));
+        const unread = {};
+        unreadMessages.forEach((message) => {
+          const senderId = String(message?.senderId || "").trim();
+          if (!senderId || !teacherUserIds.has(senderId)) return;
+          unread[senderId] = (unread[senderId] || 0) + 1;
+        });
 
-      const chatResults = await Promise.all(
-        teacherList.map(async (t) => {
-          const chatKey = `${adminUserId}_${t.userId}`;
-          const chatData = await fetchChatMessages(chatKey);
-          const msgs = Object.values(chatData || {}).map((m) => ({
-            ...m,
-            sender: m.senderId === adminUserId ? "admin" : "teacher",
-          }));
-          return { userId: t.userId, msgs };
-        })
-      );
-
-      chatResults.forEach(({ userId, msgs }) => {
-        allMessages.push(...msgs);
-        const unreadCount = msgs.filter((m) => m.receiverId === adminUserId && !m.seen).length;
-        if (unreadCount > 0) unread[userId] = unreadCount;
-      });
-
-      setPopupMessages(allMessages);
-      setUnreadTeachers(unread);
+        setPopupMessages(unreadMessages);
+        setUnreadTeachers(unread);
+      } catch (unreadErr) {
+        if (isTimeoutError(unreadErr)) {
+          console.warn("Unread message fetch timed out; keeping previous unread counts.");
+        } else {
+          console.error("Unread message fetch failed", unreadErr);
+        }
+      }
 
     } catch (err) {
       console.error(err);
@@ -734,77 +745,56 @@ const getTeachersForCourse = (courseId) => {
 
  // ---------------- FETCH UNREAD MESSAGES ----------------
   const fetchUnreadMessages = async () => {
-    if (!admin.userId) return;
+    if (!admin.userId || !schoolCode) return;
 
     try {
-      const [usersRaw, teachersRaw, chatIndex] = await Promise.all([
-        readSchoolNode("Users"),
-        readSchoolNode("Teachers"),
-        fetchJson(`${RTDB_BASE}/Chats.json?shallow=true`, {}),
-      ]);
-
-      const usersData = usersRaw && typeof usersRaw === "object" ? usersRaw : {};
-      const teachersData = teachersRaw && typeof teachersRaw === "object" ? teachersRaw : {};
-      const usersById = Object.values(usersData || {}).reduce((acc, userRecord) => {
-        const userId = String(userRecord?.userId || "").trim();
-        if (userId) acc[userId] = userRecord;
-        return acc;
-      }, {});
-      const teachersByUserId = Object.values(teachersData || {}).reduce((acc, teacherRecord) => {
-        const userId = String(teacherRecord?.userId || "").trim();
-        if (userId) acc[userId] = teacherRecord;
-        return acc;
-      }, {});
-
-      const candidateChatKeys = Object.keys(chatIndex || {}).filter((chatKey) =>
-        parseChatParticipantIds(chatKey).includes(String(admin.userId || ""))
-      );
-
-      const unreadEntries = await mapInBatches(candidateChatKeys, 20, async (chatKey) => {
-        const participantIds = parseChatParticipantIds(chatKey);
-        const otherUserId = participantIds.find((participantId) => String(participantId || "") !== String(admin.userId || ""));
-        if (!otherUserId || !teachersByUserId[otherUserId]) {
-          return null;
-        }
-
-        const encodedChatKey = encodeURIComponent(chatKey);
-        const [unreadValue, lastMessage] = await Promise.all([
-          fetchJson(`${RTDB_BASE}/Chats/${encodedChatKey}/unread/${encodeURIComponent(admin.userId)}.json`, 0),
-          fetchJson(`${RTDB_BASE}/Chats/${encodedChatKey}/lastMessage.json`, null),
-        ]);
-
-        const unreadCount = Number(unreadValue || 0);
-        if (!Number.isFinite(unreadCount) || unreadCount <= 0) {
-          return null;
-        }
-
-        return {
-          otherUserId,
-          unreadCount,
-          lastMessageTime: Number(lastMessage?.timeStamp || 0),
-        };
+      const unreadRes = await axios.get(`${API_BASE}/unread_messages/${encodeURIComponent(admin.userId)}`, {
+        params: { schoolCode },
+        timeout: 20000,
       });
+      const unreadMessages = Array.isArray(unreadRes?.data?.messages) ? unreadRes.data.messages : [];
+      const countsBySender = unreadMessages.reduce((acc, message) => {
+        const senderId = String(message?.senderId || "").trim();
+        if (!senderId) return acc;
+        acc[senderId] = (acc[senderId] || 0) + 1;
+        return acc;
+      }, {});
 
-      const senders = {};
-      unreadEntries
-        .filter(Boolean)
-        .sort((leftEntry, rightEntry) => Number(rightEntry.lastMessageTime || 0) - Number(leftEntry.lastMessageTime || 0))
-        .forEach((entry) => {
-          const teacherRecord = teachersByUserId[entry.otherUserId] || {};
-          const userRecord = usersById[entry.otherUserId] || {};
-          senders[entry.otherUserId] = {
-            type: "teacher",
-            name: userRecord?.name || teacherRecord?.name || entry.otherUserId,
-            profileImage: getSafeProfileImage(
-              userRecord?.profileImage || teacherRecord?.profileImage,
-              "/default-profile.png"
-            ),
-            count: entry.unreadCount,
-          };
-        });
+      const senderIds = Object.keys(countsBySender);
+      if (senderIds.length === 0) {
+        setUnreadSenders({});
+        return;
+      }
+
+      const usersLookupRes = await axios.get(`${API_BASE}/users_lookup`, {
+        params: {
+          schoolCode,
+          userIds: senderIds.join(","),
+        },
+        timeout: 20000,
+      });
+      const usersById =
+        usersLookupRes?.data?.users && typeof usersLookupRes.data.users === "object"
+          ? usersLookupRes.data.users
+          : {};
+
+      const senders = senderIds.reduce((acc, senderId) => {
+        const userRecord = usersById[senderId] || {};
+        acc[senderId] = {
+          type: "teacher",
+          name: userRecord?.name || userRecord?.username || senderId,
+          profileImage: getSafeProfileImage(userRecord?.profileImage, "/default-profile.png"),
+          count: Number(countsBySender[senderId] || 0),
+        };
+        return acc;
+      }, {});
 
       setUnreadSenders(senders);
     } catch (err) {
+      if (isTimeoutError(err)) {
+        console.warn("Unread sender fetch timed out; keeping previous sender list.");
+        return;
+      }
       console.error("Unread fetch failed:", err);
     }
   };
@@ -824,25 +814,39 @@ const getTeachersForCourse = (courseId) => {
   useEffect(() => {
     if (!admin.userId) return undefined;
 
-    const runRefresh = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    const runFocusedRefresh = () => {
+      lastNotificationInteractionAtRef.current = Date.now();
+      fetchUnreadMessages();
+    };
+
+    const runPassiveRefresh = () => {
+      if (!shouldRunPassiveNotificationRefresh()) {
         return;
       }
 
       fetchUnreadMessages();
     };
 
-    runRefresh();
-    const interval = window.setInterval(runRefresh, NOTIFICATION_REFRESH_MS);
-    window.addEventListener("focus", runRefresh);
-    document.addEventListener("visibilitychange", runRefresh);
+    const handleVisibilityChange = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        return;
+      }
+      runFocusedRefresh();
+    };
+
+    runFocusedRefresh();
+    const interval = window.setInterval(runPassiveRefresh, NOTIFICATION_REFRESH_MS);
+    window.addEventListener("focus", runFocusedRefresh);
+    window.addEventListener("online", runFocusedRefresh);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener("focus", runRefresh);
-      document.removeEventListener("visibilitychange", runRefresh);
+      window.removeEventListener("focus", runFocusedRefresh);
+      window.removeEventListener("online", runFocusedRefresh);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [admin.userId]);
+  }, [admin.userId, schoolCode]);
 
 
 
@@ -2660,29 +2664,24 @@ const autoGenerate = (opts = {}) => {
   };
 
   const markMessagesAsSeen = async (userId) => {
-  const key1 = `${admin.userId}_${userId}`;
-  const key2 = `${userId}_${admin.userId}`;
-
-  const [m1, m2] = await Promise.all([
-    fetchChatMessages(key1),
-    fetchChatMessages(key2)
-  ]);
-
-  const updates = {};
-
-  const collectUpdates = (data, basePath) => {
-    Object.entries(data || {}).forEach(([msgId, msg]) => {
-      if (msg.receiverId === admin.userId && !msg.seen) {
-        updates[`${basePath}/${msgId}/seen`] = true;
-      }
+  if (!admin.userId || !userId) return;
+  try {
+    await axios.post(`${API_BASE}/mark_messages_read`, {
+      adminId: admin.userId,
+      senderId: userId,
     });
-  };
-
-  collectUpdates(m1, `Chats/${key1}/messages`);
-  collectUpdates(m2, `Chats/${key2}/messages`);
-
-  if (Object.keys(updates).length > 0) {
-    await patchScopedRoot(updates);
+    setUnreadTeachers((prev) => {
+      const next = { ...(prev || {}) };
+      delete next[userId];
+      return next;
+    });
+    setUnreadSenders((prev) => {
+      const next = { ...(prev || {}) };
+      delete next[userId];
+      return next;
+    });
+  } catch (err) {
+    console.warn("Failed to mark messages as seen", err);
   }
 };
 

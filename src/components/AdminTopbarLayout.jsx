@@ -3,7 +3,7 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import Navbar from "./Navbar";
 import Sidebar from "./Sidebar";
 import TopbarActions from "./TopbarActions";
-import useTopbarNotifications, { NOTIFICATION_POLL_MS } from "../hooks/useTopbarNotifications";
+import useTopbarNotifications, { NOTIFICATION_POLL_MS } from "../hooks/notifications/useTopbarNotifications";
 import { FIREBASE_DATABASE_URL } from "../config.js";
 
 const PAGE_TITLES = {

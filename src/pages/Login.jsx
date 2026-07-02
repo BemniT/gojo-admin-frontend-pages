@@ -168,7 +168,7 @@ function Login() {
               </button>
             </form>
 
-              {/* <p className="admin-login-footer">
+            {/* <p className="admin-login-footer">
               Don&apos;t have an account? <Link to={registerLink}>Register</Link>
             </p> */}
           </div>
